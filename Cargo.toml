@@ -1,0 +1,78 @@
+[workspace]
+members = [".", "server"]
+
+[profile.release]
+lto = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Cargo
+wildcard_dependencies = "warn"
+
+# Restriction
+allow_attributes = "warn"
+clone_on_ref_ptr = "warn"
+create_dir = "warn"
+dbg_macro = "warn"
+exit = "warn"
+string_to_string = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"
+unused_trait_names = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+unwrap_used = "warn"
+
+# Nursery
+nursery = { level = "warn", priority = -1 }
+missing_const_for_fn = "allow"
+significant_drop_tightening = "allow"
+suboptimal_flops = "allow"
+option_if_let_else = "allow"
+useless_let_if_seq = "allow"
+non_send_fields_in_send_ty = "allow"
+
+# Pedantic
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+default_trait_access = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+struct_excessive_bools = "allow"
+map_unwrap_or = "allow"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+tracing = "0.1.41"
+
+[package]
+name = "webhook-forwarder"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+cli = [
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:tokio",
+]
+default = ["cli"]
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.5.38", features = ["derive"], optional = true }
+eventsource-client = "0.15.0"
+futures = "0.3.31"
+reqwest = "0.12.15"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros"], optional = true }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"], optional = true }
+url = "2.5.4"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "webhook-forwarder-server"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8.4"
+dashmap = "6.1.0"
+futures-util = "0.3.31"
+serde = { version = "1.0.219", features = ["derive"] }
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "signal"] }
+tokio-stream = { version = "0.1.17" }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+uuid = { version = "1.17.0", features = ["v4", "serde"] }
+
+[lints]
+workspace = true
