@@ -18,16 +18,14 @@ RUN cargo chef cook --release --recipe-path recipe.json --locked -p webhook-forw
 # Actually build things
 COPY . .
 # Build the server
-RUN cargo build --release --locked -p webhook-forwarder-server
+RUN cargo build --release --locked -p webhook-forwarder-server -F stackdriver
 
 # Create production image
 FROM scratch as server
 WORKDIR /whf
 COPY --from=build /target/release/webhook-forwarder-server /bin/whf
 
-ENV \
-  RUST_LOG=info \
-  PORT=80
+ENV PORT=80
 EXPOSE 80
 
 ENTRYPOINT ["whf"]

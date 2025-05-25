@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context as _;
@@ -23,12 +23,22 @@ use axum::{
 };
 use dashmap::DashMap;
 use futures_util::Stream;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
 use tokio_stream::StreamExt as _;
+use tracing::Level;
+use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    if cfg!(feature = "stackdriver") {
+        let filter = tracing_subscriber::filter::Targets::new().with_default(Level::INFO);
+        tracing_subscriber::registry()
+            .with(tracing_stackdriver::layer())
+            .with(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
     let app_state = Arc::new(AppState::default());
     let app = Router::new()
         .route("/", get(homepage))
@@ -39,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(Arc::clone(&app_state));
 
-    tokio::task::spawn(cleanup_pending_channels(app_state));
+    tokio::task::spawn(cleanup_closed_channels(app_state));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| String::from("3000"));
     let port: u16 = port.parse().context("parse port")?;
@@ -81,44 +91,27 @@ async fn shutdown_signal() {
 
 #[derive(Default)]
 struct AppState {
-    pending_channels: DashMap<ChannelId, PendingChannel>,
     active_channels: DashMap<ChannelId, Sender<Event>>,
     webhook_count: AtomicU64,
-}
-
-struct PendingChannel {
-    tx: Sender<Event>,
-    rx: Receiver<Event>,
-    create_time: Instant,
 }
 
 type ChannelId = uuid::Uuid;
 
 async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
     let version = env!("CARGO_PKG_VERSION");
-    let pending_channel_count = state.pending_channels.len();
     let active_channel_count = state.active_channels.len();
     let webhook_count = state.webhook_count.load(Ordering::Relaxed);
     Html(format!(
         "
         <h1>Webhook Forwarder Server {version}</h1>
-        <p>There are {pending_channel_count} pending channels</p>
         <p>There are {active_channel_count} active channels</p>
         <p>There have been {webhook_count} forwarded webhooks</p>
         ",
     ))
 }
 
-async fn new_channel(State(state): State<Arc<AppState>>) -> Redirect {
+async fn new_channel() -> Redirect {
     let channel_id = uuid::Uuid::new_v4();
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
-    let channel = PendingChannel {
-        tx,
-        rx,
-        create_time: Instant::now(),
-    };
-    state.pending_channels.insert(channel_id, channel);
-    tracing::info!("created channel {channel_id}");
     Redirect::to(&format!("/channel/{channel_id}"))
 }
 
@@ -126,27 +119,19 @@ async fn sse_channel(
     Path(channel_id): Path<ChannelId>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    let Some((_, channel)) = state.pending_channels.remove(&channel_id) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let PendingChannel {
-        tx,
-        rx,
-        create_time: _,
-    } = channel;
-    state.active_channels.insert(channel_id, tx);
-    let stream = ReceivingChannel {
-        channel_id,
-        rx,
-        state,
-    };
-    Ok(Sse::new(stream.map(Ok)).keep_alive(KeepAlive::default()))
+    tracing::info!("channel {channel_id} started");
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    if let Some(old) = state.active_channels.insert(channel_id, tx) {
+        tracing::warn!("replaced old channel");
+        drop(old);
+    }
+    let stream = ReceivingChannel { channel_id, rx };
+    Ok(Sse::new(stream.map(Ok)).keep_alive(KeepAlive::new()))
 }
 
 struct ReceivingChannel {
     channel_id: ChannelId,
     rx: Receiver<Event>,
-    state: Arc<AppState>,
 }
 
 impl Stream for ReceivingChannel {
@@ -162,7 +147,7 @@ impl Stream for ReceivingChannel {
 
 impl Drop for ReceivingChannel {
     fn drop(&mut self) {
-        self.state.active_channels.remove(&self.channel_id);
+        tracing::info!("channel {} stopped", self.channel_id);
     }
 }
 
@@ -184,12 +169,22 @@ async fn webhook_channel(
         body: &body,
     }) {
         Ok(event) => {
-            if let Err(err) = tx.send(event).await {
-                tracing::error!("channel closed {err}");
-                return StatusCode::NOT_FOUND;
+            let res = tx.try_send(event);
+            match res {
+                Ok(()) => {
+                    state.webhook_count.fetch_add(1, Ordering::Relaxed);
+                    StatusCode::OK
+                }
+                Err(TrySendError::Full(_)) => {
+                    tracing::error!("channel full");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+                Err(TrySendError::Closed(_)) => {
+                    state.active_channels.remove(&channel_id);
+                    tracing::error!("channel closed");
+                    StatusCode::NOT_FOUND
+                }
             }
-            state.webhook_count.fetch_add(1, Ordering::Relaxed);
-            StatusCode::OK
         }
         Err(err) => {
             tracing::error!("event serialize json data: {err}");
@@ -204,17 +199,12 @@ struct WebhookEvent<'a> {
     body: &'a [u8],
 }
 
-async fn cleanup_pending_channels(app_state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(300));
+async fn cleanup_closed_channels(app_state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    // First tick completes immediately so lets skip it
+    interval.tick().await;
     loop {
         interval.tick().await;
-        app_state.pending_channels.retain(|channel_id, channel| {
-            if channel.create_time.elapsed() > Duration::from_secs(60) {
-                tracing::info!("cleanup pending channel {channel_id}");
-                false
-            } else {
-                true
-            }
-        });
+        app_state.active_channels.retain(|_, tx| !tx.is_closed());
     }
 }

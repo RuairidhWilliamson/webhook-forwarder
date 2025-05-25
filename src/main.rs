@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser as _;
 use webhook_forwarder::{Channel, ForwardHandler};
 
@@ -8,7 +8,7 @@ struct Cli {
     channel: Option<url::Url>,
 
     #[arg(short, long)]
-    source: url::Url,
+    source: Option<url::Url>,
 
     #[arg(short, long, default_value = "http://127.0.0.1:3000")]
     target: url::Url,
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let mut channel = if let Some(channel_url) = channel {
         Channel::from_existing_channel(channel_url, handler)
     } else {
-        Channel::new(source, handler).await?
+        Channel::new(source.context("source not set")?, handler).await?
     };
     tracing::info!("webhook url: {}", channel.get_channel_url());
     tracing::info!("listening...");
