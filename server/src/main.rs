@@ -2,11 +2,12 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    task::Poll,
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -133,7 +134,9 @@ async fn sse_channel(
         channel_id,
         rx,
         state,
+        said_hello: false,
     };
+    tracing::debug!("started sse stream");
     Ok(Sse::new(stream.map(Ok)).keep_alive(KeepAlive::new()))
 }
 
@@ -141,19 +144,22 @@ struct ReceivingChannel {
     channel_id: ChannelId,
     rx: Receiver<Event>,
     state: Arc<AppState>,
+    said_hello: bool,
 }
 
 impl Stream for ReceivingChannel {
     type Item = Event;
 
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.state.stop.load(Ordering::Relaxed) {
-            return Poll::Ready(None);
+            Poll::Ready(None)
+        } else if !self.said_hello {
+            self.said_hello = true;
+            tracing::debug!("sent hi");
+            Poll::Ready(Some(Event::default().comment("hi")))
+        } else {
+            self.rx.poll_recv(cx)
         }
-        self.rx.poll_recv(cx)
     }
 }
 
