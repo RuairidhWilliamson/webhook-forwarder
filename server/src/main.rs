@@ -4,8 +4,9 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 
@@ -49,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(Arc::clone(&app_state));
 
+    let stop = app_state.stop.clone();
     tokio::task::spawn(cleanup_closed_channels(app_state));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| String::from("3000"));
@@ -59,12 +61,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("could not bind address")?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(stop))
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(stop: Arc<AtomicBool>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -87,12 +89,14 @@ async fn shutdown_signal() {
         () = terminate => {},
     }
     tracing::info!("received stop signal");
+    stop.store(true, Ordering::Relaxed);
 }
 
 #[derive(Default)]
 struct AppState {
     active_channels: DashMap<ChannelId, Sender<Event>>,
     webhook_count: AtomicU64,
+    stop: Arc<AtomicBool>,
 }
 
 type ChannelId = uuid::Uuid;
@@ -125,13 +129,18 @@ async fn sse_channel(
         tracing::warn!("replaced old channel");
         drop(old);
     }
-    let stream = ReceivingChannel { channel_id, rx };
+    let stream = ReceivingChannel {
+        channel_id,
+        rx,
+        state,
+    };
     Ok(Sse::new(stream.map(Ok)).keep_alive(KeepAlive::new()))
 }
 
 struct ReceivingChannel {
     channel_id: ChannelId,
     rx: Receiver<Event>,
+    state: Arc<AppState>,
 }
 
 impl Stream for ReceivingChannel {
@@ -140,7 +149,10 @@ impl Stream for ReceivingChannel {
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+    ) -> Poll<Option<Self::Item>> {
+        if self.state.stop.load(Ordering::Relaxed) {
+            return Poll::Ready(None);
+        }
         self.rx.poll_recv(cx)
     }
 }
