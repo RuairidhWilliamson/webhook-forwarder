@@ -23,6 +23,7 @@ use axum::{
     },
     routing::get,
 };
+use base64::Engine as _;
 use dashmap::DashMap;
 use futures_util::Stream;
 use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
@@ -51,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(Arc::clone(&app_state));
 
-    let stop = app_state.stop.clone();
+    let stop = Arc::clone(&app_state.stop);
     tokio::task::spawn(cleanup_closed_channels(app_state));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| String::from("3000"));
@@ -182,31 +183,32 @@ async fn webhook_channel(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_bytes()))
         .collect();
-    match Event::default().json_data(WebhookEvent {
-        headers,
-        body: &body,
-    }) {
-        Ok(event) => {
-            let res = tx.try_send(event);
-            match res {
-                Ok(()) => {
-                    state.webhook_count.fetch_add(1, Ordering::Relaxed);
-                    StatusCode::OK
-                }
-                Err(TrySendError::Full(_)) => {
-                    tracing::error!("channel full");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-                Err(TrySendError::Closed(_)) => {
-                    state.active_channels.remove(&channel_id);
-                    tracing::error!("channel closed");
-                    StatusCode::NOT_FOUND
-                }
-            }
+    let mut buf = Vec::new();
+    if let Err(err) = ciborium::ser::into_writer(
+        &WebhookEvent {
+            headers,
+            body: &body,
+        },
+        &mut buf,
+    ) {
+        tracing::error!("event serialize cbor data: {err}");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    let event_base64 = base64::prelude::BASE64_STANDARD.encode(&buf);
+    let event = Event::default().data(event_base64);
+    match tx.try_send(event) {
+        Ok(()) => {
+            state.webhook_count.fetch_add(1, Ordering::Relaxed);
+            StatusCode::OK
         }
-        Err(err) => {
-            tracing::error!("event serialize json data: {err}");
+        Err(TrySendError::Full(_)) => {
+            tracing::error!("channel full");
             StatusCode::INTERNAL_SERVER_ERROR
+        }
+        Err(TrySendError::Closed(_)) => {
+            state.active_channels.remove(&channel_id);
+            tracing::error!("channel closed");
+            StatusCode::NOT_FOUND
         }
     }
 }

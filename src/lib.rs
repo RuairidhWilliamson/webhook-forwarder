@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context as _, Result};
+use base64::Engine as _;
 use eventsource_client::{Client as _, Event, ReconnectOptions, SSE};
 use futures::TryStreamExt as _;
 use reqwest::{
@@ -45,17 +46,23 @@ impl<H> Channel<H> {
 }
 
 impl<H: MessageHandler> Channel<H> {
+    fn new_sse_client(&self) -> Result<impl eventsource_client::Client> {
+        Ok(
+            eventsource_client::ClientBuilder::for_url(self.channel.as_str())?
+                .reconnect(
+                    ReconnectOptions::reconnect(true)
+                        .retry_initial(false)
+                        .delay(Duration::from_secs(1))
+                        .backoff_factor(2)
+                        .delay_max(Duration::from_secs(60))
+                        .build(),
+                )
+                .build(),
+        )
+    }
+
     pub async fn start(&mut self) -> Result<()> {
-        let se_client = eventsource_client::ClientBuilder::for_url(self.channel.as_str())?
-            .reconnect(
-                ReconnectOptions::reconnect(true)
-                    .retry_initial(false)
-                    .delay(Duration::from_secs(1))
-                    .backoff_factor(2)
-                    .delay_max(Duration::from_secs(60))
-                    .build(),
-            )
-            .build();
+        let se_client = self.new_sse_client()?;
         let mut stream = se_client.stream();
         while let Some(event) = stream.try_next().await? {
             match event {
@@ -86,7 +93,9 @@ impl<H: MessageHandler> Channel<H> {
             }
             "ping" => {}
             "message" => {
-                let WebhookEvent { headers, body } = serde_json::from_str(&event.data)?;
+                let raw_event = base64::prelude::BASE64_STANDARD.decode(&event.data)?;
+                let WebhookEvent { headers, body }: WebhookEvent =
+                    ciborium::from_reader(&raw_event[..])?;
                 self.handler.handle(headers, body).await?;
             }
             _ => {

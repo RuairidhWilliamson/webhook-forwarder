@@ -33,6 +33,7 @@ suboptimal_flops = "allow"
 option_if_let_else = "allow"
 useless_let_if_seq = "allow"
 non_send_fields_in_send_ty = "allow"
+cognitive_complexity = "allow"
 
 # Pedantic
 pedantic = { level = "warn", priority = -1 }
@@ -46,7 +47,11 @@ map_unwrap_or = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+base64 = "0.22.1"
+ciborium = "0.2.2"
+serde = { version = "1.0.219", features = ["derive"] }
 tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [package]
 name = "webhook-forwarder"
@@ -63,15 +68,16 @@ default = ["cli"]
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+ciborium.workspace = true
 clap = { version = "4.5.38", features = ["derive"], optional = true }
 eventsource-client = "0.15.0"
 futures = "0.3.31"
 reqwest = "0.12.15"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde.workspace = true
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"], optional = true }
 url = "2.5.4"
 
 [lints]
